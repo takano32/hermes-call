@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75,<83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-call"
+version = "0.2.0"
+description = "SIP telephone sidecar and native tools for Hermes Agent"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+dependencies = ["aiohttp>=3.12.14,<4"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.4,<10", "ruff>=0.12,<1"]
+
+[project.scripts]
+hermes-call = "hermes_call.service:main"
+
+[tool.setuptools.packages.find]
+include = ["hermes_call*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# This single-call service performs bounded local media stat/read operations.
+ignore = ["ASYNC240"]
