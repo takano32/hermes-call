@@ -87,7 +87,29 @@ def dial(args: dict, **kwargs) -> str:
         args["request_id"],
     ):
         raise ValueError("request_id must be 32 lowercase hex characters")
-    return _request("POST", "/calls", args)
+    payload = dict(args)
+    reference = kwargs.get("conversation_id") or kwargs.get("session_id")
+    if reference:
+        payload["chat_ref"] = reference
+    return _request("POST", "/calls", payload)
+
+
+@_safe_handler
+def link(args: dict, **kwargs) -> str:
+    if set(args) != {"extension", "action"} or args["action"] not in ("link", "unlink", "status"):
+        raise ValueError("extension and action (link/unlink/status) are required")
+    extension = args["extension"]
+    if not isinstance(extension, str) or not re.fullmatch(r"[0-9]{1,12}", extension):
+        raise ValueError("invalid extension")
+    endpoint = "/bindings/" + extension
+    if args["action"] == "status":
+        return _request("GET", endpoint)
+    if args["action"] == "unlink":
+        return _request("DELETE", endpoint)
+    reference = kwargs.get("conversation_id") or kwargs.get("session_id")
+    if not reference:
+        raise ValueError("no current chat session; invoke this tool from the chat to link")
+    return _request("POST", endpoint, {"chat_ref": reference})
 
 
 @_safe_handler
@@ -107,7 +129,9 @@ def register(ctx):
                     "Call an allowed SIP extension NOW and converse using Hermes. "
                     "Use only when requested by the user or an authorized cron task. "
                     "For a future call use Hermes cron to invoke this tool later; this tool has NO "
-                    "scheduling. A dialing result means submitted, not answered or delivered. "
+                    "scheduling. A preparing/dialing result does not mean answered or delivered. "
+                    "The initial message is mandatory and plays one second after answer. "
+                    "Call conversation resumes the bound chat or the originating chat. "
                     "Use a new random request_id for each call and reuse it on retries. "
                     "Never automatically redial an unknown call."
                 ),
@@ -120,7 +144,7 @@ def register(ctx):
                             "type": "string",
                             "minLength": 1,
                             "maxLength": 2000,
-                            "description": "Opening words to speak when the call is answered",
+                            "description": "Required message spoken one second after answer",
                         },
                         "request_id": {
                             "type": "string",
@@ -129,6 +153,27 @@ def register(ctx):
                         },
                     },
                     "required": ["extension", "message", "request_id"],
+                },
+            },
+        ),
+        (
+            "hermes_call_link",
+            link,
+            {
+                "description": (
+                    "Link an allowed phone extension to THIS chat only when the user asks. "
+                    "Incoming and outgoing calls then continue this chat's history and memory. "
+                    "Use unlink for a dedicated persistent phone session, or status to read. "
+                    "The chat ID comes from runtime context; never invent another session ID."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "extension": {"type": "string", "pattern": "^[0-9]{1,12}$"},
+                        "action": {"type": "string", "enum": ["link", "unlink", "status"]},
+                    },
+                    "required": ["extension", "action"],
                 },
             },
         ),

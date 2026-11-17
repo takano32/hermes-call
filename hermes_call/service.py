@@ -15,19 +15,22 @@ from aiohttp import web
 from .config import Config
 from .conversation import Conversations
 from .sip import SipClient
-from .store import ID, Store, validate_call
+from .store import ID, Store, new_id, validate_call
 from .voice import Voice
 
 log = logging.getLogger(__name__)
 
 
 class Dialer:
-    def __init__(self, config: Config, store: Store, sip: SipClient):
+    def __init__(self, config: Config, store: Store, sip: SipClient, conversations: Conversations):
         self.config, self.store, self.sip = config, store, sip
+        self.conversations = conversations
+        self.tasks: set[asyncio.Task] = set()
 
     async def dial(self, data: dict) -> dict:
         call = validate_call(data, self.config.allowed_extensions)
-        # No await between the ledger check and INVITE submission: serialized on SIP owner thread.
+        call["chat_ref"] = self.store.binding(call["extension"]) or call["chat_ref"]
+        # Reserve the single line atomically before asynchronous TTS preparation.
         if self.store.get(call["id"]):
             result, _ = self.store.add(call)
             return result
@@ -41,17 +44,49 @@ class Dialer:
             )
         result, created = self.store.add(call)
         assert created
+        self.sip.reserved = call["id"]
+        task = asyncio.create_task(self.prepare_and_dial(call))
+        self.tasks.add(task)
+        task.add_done_callback(self.finished)
+        return result
+
+    def finished(self, task: asyncio.Task) -> None:
+        self.tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            log.error("call preparation cleanup failed (%s)", type(task.exception()).__name__)
+
+    async def prepare_and_dial(self, call: dict) -> None:
+        submitted = False
         try:
-            self.sip.dial(call["id"], call["extension"], call["message"])
+            async with asyncio.timeout(240):
+                audio = await self.conversations.prepare_initial(call["id"], call["message"])
+            if not self.sip.registered:
+                raise ConnectionError("registration lost during preparation")
+            self.store.transition(call["id"], "preparing", "dialing")
+            submitted = True
+            self.sip.dial(call["id"], call["extension"], call["message"], audio, call["chat_ref"])
+        except asyncio.CancelledError:
+            self.store.transition(call["id"], "preparing", "interrupted", "preparation cancelled")
+            raise
         except Exception as exc:
             self.store.transition(
                 call["id"],
-                "dialing",
-                "unknown",
-                "INVITE submission uncertain; inspect SIP server before redialing",
+                "dialing" if submitted else "preparing",
+                "unknown" if submitted else "failed",
+                "INVITE uncertain; inspect SIP server"
+                if submitted
+                else "initial message preparation failed",
             )
-            log.warning("SIP dial uncertain (%s)", type(exc).__name__)
-        return self.store.get(call["id"]) or result
+            log.warning("call preparation/submission failed (%s)", type(exc).__name__)
+        finally:
+            if self.sip.reserved == call["id"]:
+                self.sip.reserved = None
+
+    async def close(self) -> None:
+        tasks = list(self.tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def application(config: Config, store: Store, dialer: Dialer) -> web.Application:
@@ -70,7 +105,22 @@ def application(config: Config, store: Store, dialer: Dialer) -> web.Application
         if not isinstance(data, dict):
             raise ValueError("expected a JSON object")
         result = await dialer.dial(data)
-        return web.json_response(result, status=202 if result["state"] == "dialing" else 200)
+        return web.json_response(
+            result, status=202 if result["state"] in ("preparing", "dialing") else 200
+        )
+
+    async def binding(request: web.Request):
+        extension = request.match_info["extension"]
+        if extension not in (*config.allowed_callers, *config.allowed_extensions):
+            raise ValueError("extension must be an allowed phone extension")
+        if request.method == "POST":
+            data = await request.json()
+            if not isinstance(data, dict) or set(data) != {"chat_ref"}:
+                raise ValueError("chat_ref is required")
+            return web.json_response(store.bind(extension, data["chat_ref"]))
+        if request.method == "DELETE":
+            store.unbind(extension)
+        return web.json_response({"extension": extension, "chat_ref": store.binding(extension)})
 
     async def calls(request: web.Request):
         return web.json_response({"calls": store.list()})
@@ -87,7 +137,16 @@ def application(config: Config, store: Store, dialer: Dialer) -> web.Application
         )
 
     app = web.Application(middlewares=[auth], client_max_size=16384)
-    app.add_routes([web.post("/calls", dial), web.get("/calls", calls), web.get("/health", health)])
+    app.add_routes(
+        [
+            web.post("/calls", dial),
+            web.get("/calls", calls),
+            web.get("/health", health),
+            web.get("/bindings/{extension}", binding),
+            web.post("/bindings/{extension}", binding),
+            web.delete("/bindings/{extension}", binding),
+        ]
+    )
     return app
 
 
@@ -108,8 +167,9 @@ async def serve(config: Config) -> None:
             conversations = Conversations(config, store, Voice(config, http))
             sip = SipClient(config, conversations.accept)
             conversations.sip = sip
+            dialer = Dialer(config, store, sip, conversations)
             runner = web.AppRunner(
-                application(config, store, Dialer(config, store, sip)),
+                application(config, store, dialer),
                 access_log=None,
                 shutdown_timeout=5,
             )
@@ -117,6 +177,9 @@ async def serve(config: Config) -> None:
             loop = asyncio.get_running_loop()
             tasks = []
             try:
+                sip.inbound_audio = await conversations.prepare_initial(
+                    new_id(), config.incoming_message
+                )
                 sip.start()
                 await runner.setup()
                 await web.TCPSite(runner, "127.0.0.1", config.api_port).start()
@@ -130,6 +193,7 @@ async def serve(config: Config) -> None:
                 for sig in (signal.SIGINT, signal.SIGTERM):
                     loop.remove_signal_handler(sig)
                 await runner.cleanup()
+                await dialer.close()
                 await conversations.close()
                 for task in tasks:
                     task.cancel()

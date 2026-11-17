@@ -53,6 +53,9 @@ class CallSession:
     status: int = 0
     confirmed: bool = False
     native_disconnected: bool = False
+    confirmed_at: float | None = None
+    initial_audio: bytes | None = None
+    chat_ref: str | None = None
 
 
 class SipClient:
@@ -67,10 +70,12 @@ class SipClient:
         self.account = None
         self.pj = None
         self.closing = False
+        self.reserved: str | None = None
+        self.inbound_audio: bytes | None = None
 
     @property
     def busy(self) -> bool:
-        return bool(self.sessions)
+        return bool(self.sessions) or self.reserved is not None
 
     def start(self) -> None:
         pj = self.pj = importlib.import_module("pjsua2")
@@ -104,6 +109,8 @@ class SipClient:
                     if session:
                         session.status = info.lastStatusCode
                         if info.state == pj.PJSIP_INV_STATE_CONFIRMED:
+                            if session.confirmed_at is None:
+                                session.confirmed_at = loop.time()
                             session.confirmed = True
                             session.answered.set()
                     if info.state == pj.PJSIP_INV_STATE_DISCONNECTED:
@@ -181,9 +188,12 @@ class SipClient:
                         code = 403
                     elif owner.busy:
                         code = 486
+                    elif not owner.inbound_audio:
+                        code = 503
                     if code == 200:
                         session = CallSession(new_id(), extension, "", False)
                         session.native = call
+                        session.initial_audio = owner.inbound_audio
                         call.session = session
                         owner.sessions[session.id] = session
                         owner.on_call(session)
@@ -255,14 +265,24 @@ class SipClient:
             self.ep.libHandleEvents(0)
             await asyncio.sleep(0.01)
 
-    def dial(self, call_id: str, extension: str, message: str) -> CallSession:
+    def dial(
+        self,
+        call_id: str,
+        extension: str,
+        message: str,
+        initial_audio: bytes,
+        chat_ref: str | None = None,
+    ) -> CallSession:
         if not self.registered:
             raise ConnectionError("SIP account is not registered")
-        if self.busy:
+        if self.sessions or (self.reserved is not None and self.reserved != call_id):
             raise RuntimeError("telephone is busy")
         if extension not in self.config.allowed_extensions:
             raise ValueError("extension is not allowed")
+        if not initial_audio or len(initial_audio) % 2:
+            raise ValueError("initial message audio is mandatory")
         session = CallSession(call_id, extension, message, True)
+        session.initial_audio, session.chat_ref = initial_audio, chat_ref
         call = self.call_class(self.account, session=session)
         session.native = call
         self.sessions[call_id] = session

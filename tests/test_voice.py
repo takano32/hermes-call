@@ -86,12 +86,23 @@ def test_hermes_argv_preserves_call_session_and_cron(config, monkeypatch):
     mock = AsyncMock(return_value="こんにちは")
     monkeypatch.setattr("hermes_call.voice.run_process", mock)
     voice = Voice(config, None)
-    assert asyncio.run(voice.reply("abc", "1001", "後で電話して")) == "こんにちは"
+    assert asyncio.run(voice.reply("hermes-phone-1001", "1001", "後で電話して")) == "こんにちは"
     argv = mock.call_args.args[0]
-    assert argv[argv.index("--continue") + 1] == "hermes-call-abc"
+    assert argv[argv.index("--continue") + 1] == "hermes-phone-1001"
     assert argv[argv.index("--toolsets") + 1] == "hermes_call,cronjob"
     assert "--create-if-missing" in argv
     assert "--quiet" in argv
+
+
+def test_linked_chat_resumes_original_history_without_overriding_frozen_tools(config, monkeypatch):
+    mock = AsyncMock(return_value="前のチャットの続きですね")
+    monkeypatch.setattr("hermes_call.voice.run_process", mock)
+    voice = Voice(config, None)
+    asyncio.run(voice.reply("chat-original-123", "1001", "さっきの続き", linked=True))
+    argv = mock.call_args.args[0]
+    assert argv[argv.index("--resume") + 1] == "chat-original-123"
+    assert "--create-if-missing" not in argv
+    assert "--toolsets" not in argv
 
 
 def test_subprocess_errors_and_timeout():

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-call"
-version = "0.2.0"
+version = "0.3.0"
 description = "SIP telephone sidecar and native tools for Hermes Agent"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}

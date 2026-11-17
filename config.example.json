@@ -14,6 +14,7 @@
   "rtp_port": 40000,
   "allowed_extensions": ["1001", "1002"],
   "allowed_callers": ["1001", "1002"],
+  "incoming_message": "Hermesです。前の会話の続きもお話しできます。ご用件をどうぞ。",
   "stt_api_key": "REPLACE_WITH_GROQ_API_KEY",
   "stt_url": "https://api.groq.com/openai/v1",
   "stt_model": "whisper-large-v3-turbo",

@@ -1,8 +1,9 @@
 name: hermes-call
-version: 0.2.0
+version: 0.3.0
 description: Direct SIP user agent with public VOICEVOX (scheduling via Hermes cron)
 author: techfish-11
 python_runtime: external
 provides_tools:
   - hermes_call_dial
   - hermes_call_status
+  - hermes_call_link

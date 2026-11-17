@@ -7,7 +7,7 @@ import sqlite3
 import wave
 from pathlib import Path
 
-from .audio import RATE
+from .audio import BYTES_PER_SECOND, RATE
 from .config import Config
 from .sip import CallSession, SipClient
 from .store import Store
@@ -23,6 +23,8 @@ class Conversations:
         self.sip: SipClient | None = None
 
     def accept(self, session: CallSession) -> None:
+        if not session.outbound:
+            session.chat_ref = self.store.binding(session.extension)
         task = asyncio.create_task(self.run(session))
         self.tasks.add(task)
         task.add_done_callback(self.finished)
@@ -39,7 +41,7 @@ class Conversations:
         body = asyncio.create_task(self.talk(session, directory))
         disconnected = asyncio.create_task(session.disconnected.wait())
         try:
-            # BYE cancels STT/TTS/Hermes immediately, even during an HTTP request.
+            # BYE stops audio/HTTP waits and detaches the CLI. Gateway-accepted work may continue.
             done, _ = await asyncio.wait({body, disconnected}, return_when=asyncio.FIRST_COMPLETED)
             if body in done:
                 await body
@@ -54,9 +56,11 @@ class Conversations:
         except Exception as exc:
             outcome = "failed"
             log.error("call %s failed (%s)", session.id, type(exc).__name__)
-            if not session.disconnected.is_set():
+            if not session.disconnected.is_set() and session.confirmed_at is not None:
                 try:
                     async with asyncio.timeout(15):
+                        loop = asyncio.get_running_loop()
+                        await asyncio.sleep(max(0, session.confirmed_at + 1.0 - loop.time()))
                         await self.speak(
                             session, directory, "エラーが発生したため通話を終了します。"
                         )
@@ -91,17 +95,19 @@ class Conversations:
                 await session.ready.wait()
             if session.disconnected.is_set() or not session.confirmed:
                 return
+            if not session.initial_audio or session.confirmed_at is None:
+                raise RuntimeError("initial message must be prepared before answering")
             if session.outbound:
                 self.store.transition(session.id, "dialing", "active")
             directory.mkdir(mode=0o700, parents=True)
-            greeting = (
-                "Hermesです。" + session.message
-                if session.outbound
-                else "Hermesです。ご用件をお話しください。"
-            )
-            greeting += "音声はVOICEVOX、ずんだもんを使用しています。"
-            await self.speak(session, directory, greeting)
+            # Start at the first media-ready opportunity at/after CONFIRMED + 1 second.
+            loop = asyncio.get_running_loop()
+            await asyncio.sleep(max(0, session.confirmed_at + 1.0 - loop.time()))
+            if session.disconnected.is_set():
+                return
+            await session.audio.play(session.initial_audio)
             silent = 0
+            first_turn = True
             for _ in range(60):
                 pcm = await session.audio.listen()
                 if not pcm:
@@ -124,8 +130,45 @@ class Conversations:
                         return
                     continue
                 silent = 0
-                reply = await self.voice.reply(session.id, session.extension, text)
+                if first_turn:
+                    opening = session.message if session.outbound else self.config.incoming_message
+                    text = f"[電話の冒頭ですでに読み上げた内容: {opening}]\n{text}"
+                    first_turn = False
+                reference = session.chat_ref or f"hermes-phone-{session.extension}"
+                reply = await self.voice.reply(
+                    reference, session.extension, text, linked=session.chat_ref is not None
+                )
                 await self.speak(session, directory, reply)
+
+    async def prepare_initial(self, call_id: str, text: str) -> bytes:
+        """Complete all TTS before INVITE/answer, so network latency cannot delay the greeting."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("initial message is mandatory")
+        directory = self.config.data_dir / "media" / call_id
+        directory.mkdir(mode=0o700, parents=True)
+        pcm = bytearray()
+        try:
+            text += "音声はVOICEVOX、ずんだもんを使用しています。"
+            for chunk in split_text(text, self.config.tts_max_text_chars):
+                path = directory / "initial.wav"
+                await self.voice.synthesize(chunk, path)
+                pcm.extend(self.read_pcm(path))
+                if len(pcm) > BYTES_PER_SECOND * 180:
+                    raise ValueError("initial message audio exceeded 180 seconds")
+            if not pcm:
+                raise ValueError("initial message produced no audio")
+            return bytes(pcm)
+        finally:
+            shutil.rmtree(directory)
+
+    @staticmethod
+    def read_pcm(path: Path) -> bytes:
+        with wave.open(str(path), "rb") as wav:
+            if (wav.getsampwidth(), wav.getnchannels(), wav.getframerate()) != (2, 1, RATE):
+                raise RuntimeError("TTS output must be mono PCM16 16kHz")
+            if not 0 < wav.getnframes() <= RATE * 180:
+                raise RuntimeError("TTS audio exceeded duration limit")
+            return wav.readframes(wav.getnframes())
 
     async def speak(self, session: CallSession, directory: Path, text: str) -> None:
         for chunk in split_text(text, self.config.tts_max_text_chars):
@@ -137,12 +180,7 @@ class Conversations:
         path = directory / "reply.wav"
         try:
             await self.voice.synthesize(text, path)
-            with wave.open(str(path), "rb") as wav:
-                if (wav.getsampwidth(), wav.getnchannels(), wav.getframerate()) != (2, 1, RATE):
-                    raise RuntimeError("TTS output must be mono PCM16 16kHz")
-                if wav.getnframes() > RATE * 180:
-                    raise RuntimeError("TTS audio exceeded duration limit")
-                pcm = wav.readframes(wav.getnframes())
+            pcm = self.read_pcm(path)
             await session.audio.play(pcm)
         finally:
             path.unlink(missing_ok=True)

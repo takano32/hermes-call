@@ -20,6 +20,7 @@ import pytest
         {"rtp_port": 40001},
         {"stt_api_key": "REPLACE_WITH_GROQ_API_KEY"},
         {"hermes_command": ("hermes",)},
+        {"incoming_message": " "},
     ],
 )
 def test_invalid_config(config, change):

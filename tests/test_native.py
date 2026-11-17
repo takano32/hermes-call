@@ -71,7 +71,7 @@ def test_native_registration_and_direct_invite(config):
             sip.start()
             poll = asyncio.create_task(sip.poll())
             await asyncio.wait_for(sip.registered_event.wait(), 5)
-            session = sip.dial("f" * 32, "1001", "hello")
+            session = sip.dial("f" * 32, "1001", "hello", b"\0\0")
             await asyncio.wait_for(session.disconnected.wait(), 5)
             assert session.status == 486
             assert registrar.invites == ["INVITE sip:1001@127.0.0.1 SIP/2.0"]

@@ -1,3 +1,4 @@
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -36,9 +37,35 @@ def test_atomic_idempotency_and_state_recovery(tmp_path):
     assert len(store.list()) == 1
     with pytest.raises(ValueError, match="different"):
         store.add({**call, "message": "changed"})
+    assert store.transition(call["id"], "preparing", "dialing")
     assert store.transition(call["id"], "dialing", "active")
     assert not store.transition(call["id"], "dialing", "active")
     store.recover()
     assert store.get(call["id"])["state"] == "unknown"
     _, created = store.add(call)
     assert not created  # Even ambiguous calls cannot be accidentally redialed.
+
+
+def test_migration_preserves_old_calls_and_durable_links(tmp_path):
+    path = tmp_path / "old.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE calls (id TEXT PRIMARY KEY, extension TEXT,
+            message TEXT, created REAL, updated REAL, state TEXT, detail TEXT)""")
+        db.execute(
+            "INSERT INTO calls VALUES (?,?,?,?,?,?,?)",
+            ("a" * 32, "1001", "old message", 1, 1, "completed", ""),
+        )
+    store = Store(path)
+    assert store.get("a" * 32)["message"] == "old message"
+    assert store.get("a" * 32)["chat_ref"] is None
+    store.bind("1001", "chat-original")
+    assert Store(path).binding("1001") == "chat-original"
+    store.unbind("1001")
+    assert store.binding("1001") is None
+
+
+@pytest.mark.parametrize("reference", ["latest", "", "-q", "chat\nother", "a" * 201, 123])
+def test_reject_ambiguous_or_invalid_chat_references(tmp_path, reference):
+    store = Store(tmp_path / "calls.sqlite")
+    with pytest.raises(ValueError):
+        store.bind("1001", reference)

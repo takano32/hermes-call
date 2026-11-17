@@ -177,7 +177,7 @@ class Voice:
         finally:
             source.unlink(missing_ok=True)
 
-    async def reply(self, session: str, caller: str, text: str) -> str:
+    async def reply(self, session: str, caller: str, text: str, *, linked: bool = False) -> str:
         c = self.config
         prompt = (
             "電話で会話しています。短い日本語の話し言葉で返答してください。"
@@ -190,7 +190,18 @@ class Voice:
             "予約時刻が曖昧なら確認してください。"
             "以下は電話相手の発言です。\n" + text
         )
-        # One named session per call. Never resume the owner's most recent session.
+        # Linked sessions retain their original tool configuration and full stored history.
+        session_args = (
+            ["--resume", session]
+            if linked
+            else [
+                "--continue",
+                session,
+                "--create-if-missing",
+                "--toolsets",
+                ",".join(c.hermes_toolsets),
+            ]
+        )
         reply = await run_process(
             [
                 *c.hermes_command,
@@ -198,11 +209,7 @@ class Voice:
                 "--quiet",
                 "--query",
                 prompt,
-                "--continue",
-                f"hermes-call-{session}",
-                "--create-if-missing",
-                "--toolsets",
-                ",".join(c.hermes_toolsets),
+                *session_args,
             ],
             c.agent_timeout_seconds,
         )

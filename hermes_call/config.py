@@ -42,8 +42,15 @@ class Config:
     max_call_seconds: int = 1800
     agent_timeout_seconds: int = 120
     hermes_toolsets: tuple[str, ...] = ("hermes_call", "cronjob")
+    incoming_message: str = "Hermesです。前の会話の続きもお話しできます。ご用件をどうぞ。"
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.incoming_message, str)
+            or not self.incoming_message.strip()
+            or len(self.incoming_message) > 2000
+        ):
+            raise ValueError("incoming_message must contain 1..2000 characters")
         for name in ("api_token", "sip_password", "stt_api_key"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip() or value.startswith("REPLACE_"):

@@ -10,10 +10,17 @@ from pathlib import Path
 from typing import Any
 
 ID = re.compile(r"[a-f0-9]{32}\Z")
+SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\Z")
+
+
+def validate_chat_ref(value: str) -> str:
+    if not isinstance(value, str) or not SESSION.fullmatch(value) or value == "latest":
+        raise ValueError("chat_ref must be an explicit Hermes session ID")
+    return value
 
 
 def validate_call(data: dict, allowed: tuple[str, ...]) -> dict:
-    if set(data) - {"extension", "message", "request_id"}:
+    if set(data) - {"extension", "message", "request_id", "chat_ref"}:
         raise ValueError("unknown field (scheduling belongs to Hermes cron)")
     ext, message, key = data.get("extension"), data.get("message"), data.get("request_id")
     if not isinstance(ext, str) or ext not in allowed:
@@ -22,7 +29,10 @@ def validate_call(data: dict, allowed: tuple[str, ...]) -> dict:
         raise ValueError("message must contain 1..2000 characters")
     if not isinstance(key, str) or not ID.fullmatch(key):
         raise ValueError("request_id must be 32 lowercase hex characters; reuse on retries")
-    return {"id": key, "extension": ext, "message": message.strip()}
+    reference = data.get("chat_ref")
+    if reference is not None:
+        validate_chat_ref(reference)
+    return {"id": key, "extension": ext, "message": message.strip(), "chat_ref": reference}
 
 
 class Store:
@@ -34,6 +44,11 @@ class Store:
                 id TEXT PRIMARY KEY, extension TEXT NOT NULL, message TEXT NOT NULL,
                 created REAL NOT NULL, updated REAL NOT NULL,
                 state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '')""")
+            columns = {r["name"] for r in db.execute("PRAGMA table_info(calls)")}
+            if "chat_ref" not in columns:
+                db.execute("ALTER TABLE calls ADD COLUMN chat_ref TEXT")
+            db.execute("""CREATE TABLE IF NOT EXISTS bindings (
+                extension TEXT PRIMARY KEY, chat_ref TEXT NOT NULL, updated REAL NOT NULL)""")
         if os.name == "posix":
             path.chmod(0o600)
 
@@ -55,20 +70,22 @@ class Store:
                 if (
                     existing["extension"] != call["extension"]
                     or existing["message"] != call["message"]
+                    or existing["chat_ref"] != call.get("chat_ref")
                 ):
                     raise ValueError("request_id already used for a different call")
                 return dict(existing), False
             now = time.time()
             db.execute(
-                "INSERT INTO calls VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO calls VALUES (?,?,?,?,?,?,?,?)",
                 (
                     call["id"],
                     call["extension"],
                     call["message"],
                     now,
                     now,
-                    "dialing",
+                    "preparing",
                     "",
+                    call.get("chat_ref"),
                 ),
             )
             return dict(
@@ -101,9 +118,30 @@ class Store:
             db.execute(
                 """UPDATE calls SET state='unknown',
                 detail='service restarted; inspect PBX before redialing', updated=?
-                WHERE state IN ('dialing','active')""",
+                WHERE state IN ('preparing','dialing','active')""",
                 (time.time(),),
             )
+
+    def bind(self, extension: str, chat_ref: str) -> dict:
+        validate_chat_ref(chat_ref)
+        with self.connect() as db:
+            db.execute(
+                """INSERT INTO bindings VALUES (?,?,?) ON CONFLICT(extension)
+                DO UPDATE SET chat_ref=excluded.chat_ref, updated=excluded.updated""",
+                (extension, chat_ref, time.time()),
+            )
+        return {"extension": extension, "chat_ref": chat_ref}
+
+    def binding(self, extension: str) -> str | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT chat_ref FROM bindings WHERE extension=?", (extension,)
+            ).fetchone()
+            return row[0] if row else None
+
+    def unbind(self, extension: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM bindings WHERE extension=?", (extension,))
 
 
 def new_id() -> str:

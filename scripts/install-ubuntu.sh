@@ -83,7 +83,7 @@ Environment=PATH=${hermes_bin%/*}:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$install_dir/venv/bin/hermes-call --config $config_dir/config.json
 WorkingDirectory=$install_dir
 Restart=on-failure
-RestartSec=5
+RestartSec=30
 TimeoutStopSec=15
 KillMode=control-group
 UMask=0077
