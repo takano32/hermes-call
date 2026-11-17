@@ -158,7 +158,7 @@ class Voice:
         async with self.tts_lock:
             loop = asyncio.get_running_loop()
             await asyncio.sleep(max(0, self.tts_next - loop.time()))
-            self.tts_next = loop.time() + 2.1
+            self.tts_next = loop.time() + 0.1
             async with self.http.post(
                 self.config.tts_url + endpoint,
                 json=payload,
