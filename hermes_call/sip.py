@@ -20,10 +20,39 @@ from .store import new_id
 log = logging.getLogger(__name__)
 
 
+_ADDR_SPEC = re.compile(
+    r"sips?:([0-9]{1,12})@([A-Za-z0-9.-]+)(?::[0-9]+)?(?:;[^\s>]*)?\Z",
+    re.IGNORECASE,
+)
+
+
+def _extract_name_addr(text: str) -> str | None:
+    quoted = escaped = False
+    for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quoted:
+            escaped = True
+        elif char == '"':
+            quoted = not quoted
+        elif not quoted and char == "<":
+            end = text.find(">", index + 1)
+            if end < 0:
+                return None
+            rest = text[end + 1 :].lstrip()
+            if rest and not rest.startswith(";"):
+                return None
+            return text[index + 1 : end].strip()
+    return None
+
+
 def caller_identity(uri: str) -> tuple[str | None, str | None]:
-    match = re.search(
-        r"(?:^|<)sips?:([0-9]{1,12})@([A-Za-z0-9.-]+)(?::[0-9]+)?(?:[;>]|$)", uri, re.IGNORECASE
-    )
+    text = uri.strip()
+    if (addr := _extract_name_addr(text)) is None:
+        if "<" in text or ">" in text:
+            return (None, None)
+        addr = text
+    match = _ADDR_SPEC.fullmatch(addr)
     return (match[1], match[2].lower()) if match else (None, None)
 
 

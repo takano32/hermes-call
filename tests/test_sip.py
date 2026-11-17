@@ -10,6 +10,7 @@ from hermes_call.sip import (
     SipClient,
     _abort_session,
     caller_extension,
+    caller_identity,
     incoming_decision,
     media_snapshot,
     native_error,
@@ -26,10 +27,22 @@ from hermes_call.sip import (
         ("sip:1001@evil.example.com", None),
         ("sip:1001%40evil@pbx.example.com", None),
         ("sip:1001@pbx.example.com.evil", None),
+        ('"<sip:1001@pbx.example.com>" <sip:9999@evil.example.com>', None),
+        ('"Escaped \\"<sip:1001@pbx.example.com>" <sip:9999@pbx.example.com>', "9999"),
+        ('"<sip:1001@pbx.example.com>" <sip:9999@pbx.example.com>;tag=abc', "9999"),
+        ('"Name" <sip:1001@pbx.example.com> <sip:9999@evil.example>', None),
     ],
 )
 def test_caller_uri_domain_validation(uri, expected):
     assert caller_extension(uri, "pbx.example.com") == expected
+
+
+def test_caller_identity_ignores_spoofed_display_name_uri():
+    assert caller_identity('"<sip:1001@pbx.example.com>" <sip:9999@evil.example>') == (
+        "9999",
+        "evil.example",
+    )
+    assert caller_identity('"unclosed <sip:1001@pbx.example.com>') == (None, None)
 
 
 def test_source_address_validation():
