@@ -47,6 +47,9 @@ class Store:
             columns = {r["name"] for r in db.execute("PRAGMA table_info(calls)")}
             if "chat_ref" not in columns:
                 db.execute("ALTER TABLE calls ADD COLUMN chat_ref TEXT")
+            if "request_chat_ref" not in columns:
+                db.execute("ALTER TABLE calls ADD COLUMN request_chat_ref TEXT")
+                db.execute("UPDATE calls SET request_chat_ref=chat_ref")
             db.execute("""CREATE TABLE IF NOT EXISTS bindings (
                 extension TEXT PRIMARY KEY, chat_ref TEXT NOT NULL, updated REAL NOT NULL)""")
         if os.name == "posix":
@@ -62,7 +65,16 @@ class Store:
         finally:
             db.close()
 
+    @staticmethod
+    def _public_call(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data.pop("request_chat_ref", None)
+        return data
+
     def add(self, call: dict) -> tuple[dict, bool]:
+        request_chat_ref = (
+            call["request_chat_ref"] if "request_chat_ref" in call else call.get("chat_ref")
+        )
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT * FROM calls WHERE id=?", (call["id"],)).fetchone()
@@ -70,15 +82,16 @@ class Store:
                 if (
                     existing["extension"] != call["extension"]
                     or existing["message"] != call["message"]
-                    or existing["chat_ref"] != call.get("chat_ref")
+                    or existing["request_chat_ref"] != request_chat_ref
                 ):
                     raise ValueError("request_id already used for a different call")
-                return dict(existing), False
+                return self._public_call(existing), False
             now = time.time()
             db.execute(
                 """INSERT INTO calls
-                (id, extension, message, created, updated, state, detail, chat_ref)
-                VALUES (?,?,?,?,?,?,?,?)""",
+                (id, extension, message, created, updated, state, detail,
+                 chat_ref, request_chat_ref)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
                     call["id"],
                     call["extension"],
@@ -88,22 +101,24 @@ class Store:
                     "preparing",
                     "",
                     call.get("chat_ref"),
+                    request_chat_ref,
                 ),
             )
-            return dict(
+            return self._public_call(
                 db.execute("SELECT * FROM calls WHERE id=?", (call["id"],)).fetchone()
             ), True
 
     def list(self) -> list[dict[str, Any]]:
         with self.connect() as db:
             return [
-                dict(r) for r in db.execute("SELECT * FROM calls ORDER BY created DESC LIMIT 100")
+                self._public_call(r)
+                for r in db.execute("SELECT * FROM calls ORDER BY created DESC LIMIT 100")
             ]
 
     def get(self, call_id: str) -> dict | None:
         with self.connect() as db:
             row = db.execute("SELECT * FROM calls WHERE id=?", (call_id,)).fetchone()
-            return dict(row) if row else None
+            return self._public_call(row) if row else None
 
     def transition(self, call_id: str, old: str, new: str, detail: str = "") -> bool:
         with self.connect() as db:

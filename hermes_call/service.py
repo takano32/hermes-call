@@ -29,11 +29,11 @@ class Dialer:
 
     async def dial(self, data: dict) -> dict:
         call = validate_call(data, self.config.allowed_extensions)
-        # Check idempotency before resolving mutable extension bindings.
-        if existing := self.store.get(call["id"]):
-            if existing["extension"] != call["extension"] or existing["message"] != call["message"]:
-                raise ValueError("request_id already used for a different call")
-            return existing
+        call["request_chat_ref"] = call["chat_ref"]
+        # Check idempotency against the original request parameters before binding resolution.
+        if self.store.get(call["id"]):
+            result, _ = self.store.add(call)
+            return result
         call["chat_ref"] = self.store.binding(call["extension"]) or call["chat_ref"]
         # Reserve the single line atomically before asynchronous TTS preparation.
         if not self.sip.registered:

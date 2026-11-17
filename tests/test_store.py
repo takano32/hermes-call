@@ -86,3 +86,8 @@ def test_insert_uses_explicit_columns_regardless_of_table_column_order(tmp_path)
     assert added["extension"] == "1001"
     assert added["chat_ref"] == "chat-1"
     assert added["state"] == "preparing"
+    assert "request_chat_ref" not in added
+    assert "request_chat_ref" not in store.get("b" * 32)
+    assert "request_chat_ref" not in store.list()[0]
+    with pytest.raises(ValueError, match="different"):
+        store.add({"id": "b" * 32, "extension": "1001", "message": "hello", "chat_ref": "chat-2"})

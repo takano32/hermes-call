@@ -127,7 +127,26 @@ def test_chat_binding_api_and_outbound_chat_selection(config, tmp_path):
             store.bind("1001", "chat-other")
             assert (await dialer.dial(data))["chat_ref"] == "chat-main"
             with pytest.raises(ValueError, match="different"):
+                await dialer.dial({**data, "chat_ref": "other-origin"})
+            with pytest.raises(ValueError, match="different"):
                 await dialer.dial({**data, "message": "changed"})
+
+            # Unbound call must also reject retries with a different explicit chat_ref.
+            sip.busy = False
+            store.unbind("1001")
+            unbound = {
+                "extension": "1001",
+                "message": "hello",
+                "request_id": "1" * 32,
+                "chat_ref": "chat-a",
+            }
+            await dialer.dial(unbound)
+            await asyncio.gather(*list(dialer.tasks))
+            assert (await dialer.dial(unbound))["chat_ref"] == "chat-a"
+            with pytest.raises(ValueError, match="different"):
+                await dialer.dial({**unbound, "chat_ref": "chat-b"})
+            with pytest.raises(ValueError, match="different"):
+                await dialer.dial({**unbound, "chat_ref": None})
         await dialer.close()
 
     asyncio.run(scenario())
