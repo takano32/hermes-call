@@ -120,6 +120,14 @@ def test_chat_binding_api_and_outbound_chat_selection(config, tmp_path):
             assert store.get("f" * 32)["chat_ref"] == "chat-main"
             assert (await client.delete(path, headers=headers)).status == 200
             assert store.binding("1001") is None
+            # Retrying the same request_id after unbinding/rebinding stays idempotent.
+            retried = await dialer.dial(data)
+            assert retried["id"] == "f" * 32
+            assert retried["chat_ref"] == "chat-main"
+            store.bind("1001", "chat-other")
+            assert (await dialer.dial(data))["chat_ref"] == "chat-main"
+            with pytest.raises(ValueError, match="different"):
+                await dialer.dial({**data, "message": "changed"})
         await dialer.close()
 
     asyncio.run(scenario())
