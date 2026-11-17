@@ -2,6 +2,7 @@
 
 import ipaddress
 import json
+import math
 import os
 import re
 import stat
@@ -44,8 +45,18 @@ class Config:
     hermes_toolsets: tuple[str, ...] = ("hermes_call", "cronjob")
     incoming_message: str = "Hermesです。前の会話の続きもお話しできます。ご用件をどうぞ。"
     allowed_caller_domains: tuple[str, ...] = ()
+    sound_effects: bool = True
+    sound_volume: float = 0.10
 
     def __post_init__(self) -> None:
+        if type(self.sound_effects) is not bool:
+            raise ValueError("sound_effects must be boolean")
+        if (
+            type(self.sound_volume) not in (int, float)
+            or not math.isfinite(self.sound_volume)
+            or not 0 <= self.sound_volume <= 0.3
+        ):
+            raise ValueError("sound_volume must be a finite number in 0..0.3")
         if (
             not isinstance(self.incoming_message, str)
             or not self.incoming_message.strip()

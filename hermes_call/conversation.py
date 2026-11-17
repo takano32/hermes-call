@@ -10,6 +10,7 @@ from pathlib import Path
 from .audio import BYTES_PER_SECOND, RATE
 from .config import Config
 from .sip import CallSession, SipClient
+from .sounds import Stage, StatusSounds
 from .store import Store
 from .voice import Voice, split_text
 
@@ -45,7 +46,10 @@ class Conversations:
             done, _ = await asyncio.wait({body, disconnected}, return_when=asyncio.FIRST_COMPLETED)
             if body in done:
                 await body
-            if session.disconnected.is_set() and not session.confirmed:
+            if session.disconnected.is_set() and session.confirmed and not session.media_connected:
+                outcome = "failed"
+                session.failure_reason = "audio_not_ready"
+            elif session.disconnected.is_set() and not session.confirmed:
                 outcome = "unanswered" if session.status in (408, 480, 486, 487, 603) else "failed"
             if session.failure_reason:
                 outcome = "failed"
@@ -63,6 +67,8 @@ class Conversations:
                     async with asyncio.timeout(15):
                         loop = asyncio.get_running_loop()
                         await asyncio.sleep(max(0, session.confirmed_at + 1.0 - loop.time()))
+                        sounds = self.sounds(session)
+                        await sounds.error()
                         await self.speak(
                             session, directory, "エラーが発生したため通話を終了します。"
                         )
@@ -79,6 +85,7 @@ class Conversations:
             body.cancel()
             disconnected.cancel()
             await asyncio.gather(body, disconnected, return_exceptions=True)
+            self.sounds(session).clear()
             if session.outbound:
                 try:
                     self.store.transition(session.id, "active", outcome)
@@ -98,6 +105,7 @@ class Conversations:
                         log.error("call %s media cleanup failed; retry on startup", session.id)
 
     async def talk(self, session: CallSession, directory: Path) -> None:
+        sounds = self.sounds(session)
         async with asyncio.timeout(self.config.max_call_seconds):
             async with asyncio.timeout(45):
                 await session.answered.wait()
@@ -114,10 +122,12 @@ class Conversations:
             await asyncio.sleep(max(0, session.confirmed_at + 1.0 - loop.time()))
             if session.disconnected.is_set():
                 return
+            log.info("call %s initial message playback starting", session.id)
             await session.audio.play(session.initial_audio)
             silent = 0
             first_turn = True
             for _ in range(60):
+                await sounds.listening()
                 pcm = await session.audio.listen()
                 if not pcm:
                     silent += 1
@@ -125,6 +135,7 @@ class Conversations:
                         return
                     await self.speak(session, directory, "もう一度お話しください。")
                     continue
+                sounds.waiting(Stage.TRANSCRIBING, cue=Stage.RECEIVED)
                 path = directory / "input.wav"
                 try:
                     with wave.open(str(path), "wb") as wav:
@@ -134,6 +145,7 @@ class Conversations:
                 finally:
                     path.unlink(missing_ok=True)
                 if not text:
+                    await sounds.error()
                     silent += 1
                     if silent >= 3:
                         return
@@ -144,8 +156,13 @@ class Conversations:
                     text = f"[電話の冒頭ですでに読み上げた内容: {opening}]\n{text}"
                     first_turn = False
                 reference = session.chat_ref or f"hermes-phone-{session.extension}"
+                sounds.thinking()
                 reply = await self.voice.reply(
-                    reference, session.extension, text, linked=session.chat_ref is not None
+                    reference,
+                    session.extension,
+                    text,
+                    linked=session.chat_ref is not None,
+                    on_event=sounds.tool_event,
                 )
                 await self.speak(session, directory, reply)
 
@@ -180,10 +197,18 @@ class Conversations:
             return wav.readframes(wav.getnframes())
 
     async def speak(self, session: CallSession, directory: Path, text: str) -> None:
+        sounds = self.sounds(session)
         for chunk in split_text(text, self.config.tts_max_text_chars):
             if session.disconnected.is_set():
                 raise ConnectionError("call disconnected")
-            await self.speak_chunk(session, directory, chunk)
+            sounds.waiting(Stage.SYNTHESIZING)
+            try:
+                await self.speak_chunk(session, directory, chunk)
+            finally:
+                sounds.clear()
+
+    def sounds(self, session: CallSession) -> StatusSounds:
+        return StatusSounds(session.audio, self.config.sound_effects, self.config.sound_volume)
 
     async def speak_chunk(self, session: CallSession, directory: Path, text: str) -> None:
         path = directory / "reply.wav"

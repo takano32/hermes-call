@@ -21,6 +21,10 @@ import pytest
         {"stt_api_key": "REPLACE_WITH_GROQ_API_KEY"},
         {"hermes_command": ("hermes",)},
         {"incoming_message": " "},
+        {"sound_effects": "true"},
+        {"sound_volume": float("nan")},
+        {"sound_volume": 0.31},
+        {"sound_volume": True},
     ],
 )
 def test_invalid_config(config, change):

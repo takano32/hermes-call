@@ -32,6 +32,7 @@ def test_remote_hangup_cancels_agent_and_releases_resources(config, tmp_path):
         calls.sip = SimpleNamespace(hangup=Mock(), release=Mock())
         session = CallSession("a" * 32, "1001", "hello", True)
         session.confirmed = True
+        session.media_connected = True
         task = asyncio.create_task(calls.run(session))
         await started.wait()
         session.disconnected.set()

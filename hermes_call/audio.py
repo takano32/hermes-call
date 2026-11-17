@@ -19,6 +19,10 @@ class AudioBuffer:
         self.overflow = False
         self.outgoing = b""
         self.position = 0
+        self.effect_intro = b""
+        self.effect_loop = b""
+        self.effect_position = 0
+        self.effect_loop_position = 0
         self.ended = threading.Event()
 
     def receive(self, pcm: bytes) -> None:
@@ -32,9 +36,32 @@ class AudioBuffer:
 
     def provide(self, size: int) -> bytes:
         with self.lock:
-            chunk = self.outgoing[self.position : self.position + size]
-            self.position += len(chunk)
+            if self.ended.is_set():
+                return b"\0" * size
+            if self.position < len(self.outgoing):
+                chunk = self.outgoing[self.position : self.position + size]
+                self.position += len(chunk)
+                return chunk.ljust(size, b"\0")
+            chunk = self.effect_intro[self.effect_position : self.effect_position + size]
+            self.effect_position += len(chunk)
+            while len(chunk) < size and self.effect_loop:
+                count = min(size - len(chunk), len(self.effect_loop) - self.effect_loop_position)
+                chunk += self.effect_loop[
+                    self.effect_loop_position : self.effect_loop_position + count
+                ]
+                self.effect_loop_position = (self.effect_loop_position + count) % len(
+                    self.effect_loop
+                )
             return chunk.ljust(size, b"\0")
+
+    def set_effect(self, intro: bytes, loop: bytes = b"") -> None:
+        if any(len(value) % 2 or len(value) > BYTES_PER_SECOND * 4 for value in (intro, loop)):
+            raise ValueError("effects must be bounded PCM16")
+        with self.lock:
+            if self.ended.is_set():
+                return
+            self.effect_intro, self.effect_loop = intro, loop
+            self.effect_position = self.effect_loop_position = 0
 
     def stop(self) -> None:
         self.ended.set()
@@ -42,12 +69,14 @@ class AudioBuffer:
             self.capture = False
             self.outgoing = b""
             self.position = 0
+            self.effect_intro = self.effect_loop = b""
 
     async def play(self, pcm: bytes) -> None:
         if len(pcm) > BYTES_PER_SECOND * 180 or len(pcm) % 2:
             raise ValueError("playback must be bounded PCM16")
         with self.lock:
             self.capture = False
+            self.effect_intro = self.effect_loop = b""
             self.outgoing, self.position = pcm, 0
         try:
             async with asyncio.timeout(185):

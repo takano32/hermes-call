@@ -95,6 +95,8 @@ def test_hermes_argv_preserves_call_session_and_cron(config, monkeypatch):
     assert argv[argv.index("--toolsets") + 1] == "hermes_call,cronjob"
     assert "--create-if-missing" in argv
     assert "--quiet" in argv
+    assert argv[argv.index("--format") + 1] == "stream-json"
+    assert mock.call_args.kwargs["stream_json"] is True
 
 
 def test_linked_chat_resumes_original_history_without_overriding_frozen_tools(config, monkeypatch):

@@ -8,6 +8,7 @@ import os
 import signal
 import struct
 import wave
+from collections.abc import Callable
 from pathlib import Path
 
 import aiohttp
@@ -56,7 +57,14 @@ def split_text(text: str, limit: int) -> list[str]:
     return chunks
 
 
-async def run_process(argv: list[str], deadline_seconds: int, env: dict | None = None) -> str:
+async def run_process(
+    argv: list[str],
+    deadline_seconds: int,
+    env: dict | None = None,
+    *,
+    stream_json: bool = False,
+    on_event: Callable[[dict], None] | None = None,
+) -> str:
     """Kill the entire subprocess group on timeout/cancellation (Ubuntu)."""
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -70,17 +78,19 @@ async def run_process(argv: list[str], deadline_seconds: int, env: dict | None =
 
     async def read_output() -> bytes:
         assert proc.stdout is not None
+        if stream_json:
+            return await read_agent_events(proc.stdout, on_event)
         output = bytearray()
         while chunk := await proc.stdout.read(16384):
             output.extend(chunk)
             if len(output) > 256 * 1024:
                 raise RuntimeError("subprocess output exceeded limit")
-        await proc.wait()
         return bytes(output)
 
     try:
         async with asyncio.timeout(deadline_seconds):
             output = await read_output()
+            await proc.wait()
         if proc.returncode:
             raise RuntimeError(f"subprocess failed (exit {proc.returncode})")
         return output.decode("utf-8", errors="strict").strip()
@@ -92,6 +102,47 @@ async def run_process(argv: list[str], deadline_seconds: int, env: dict | None =
                 else:
                     proc.kill()
             await proc.wait()
+
+
+async def read_agent_events(
+    reader: asyncio.StreamReader, on_event: Callable[[dict], None] | None
+) -> bytes:
+    """Consume the documented Hermes JSONL protocol without retaining tool input/output."""
+    total = 0
+    final = None
+    while line := await reader.readline():
+        total += len(line)
+        if total > 2 * 1024 * 1024:
+            raise RuntimeError("Hermes event stream exceeded limit")
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            raise RuntimeError("Hermes did not emit valid stream-json") from None
+        if not isinstance(event, dict):
+            raise RuntimeError("invalid Hermes event")
+        kind = event.get("type")
+        if final is not None:
+            raise RuntimeError("Hermes emitted data after terminal result")
+        if kind == "result":
+            if type(event.get("exit_code")) is not int or event["exit_code"] != 0:
+                raise RuntimeError("Hermes reported a failed turn")
+            text = event.get("text")
+            if not isinstance(text, str) or len(text) > 8000:
+                raise RuntimeError("invalid Hermes terminal text")
+            final = text.encode("utf-8")
+        elif kind in ("tool_use", "tool_result") and on_event:
+            # Arguments/results can contain private data; forward lifecycle metadata only.
+            progress = {"type": kind, "is_error": event.get("is_error") is True}
+            for field in ("name", "tool_call_id"):
+                value = event.get(field)
+                if isinstance(value, str) and 0 < len(value) <= 200:
+                    progress[field] = value
+            on_event(progress)
+    if final is None:
+        raise RuntimeError(
+            "Hermes stream ended without a terminal result; do not retry automatically"
+        )
+    return final
 
 
 class Voice:
@@ -199,7 +250,15 @@ class Voice:
         finally:
             source.unlink(missing_ok=True)
 
-    async def reply(self, session: str, caller: str, text: str, *, linked: bool = False) -> str:
+    async def reply(
+        self,
+        session: str,
+        caller: str,
+        text: str,
+        *,
+        linked: bool = False,
+        on_event: Callable[[dict], None] | None = None,
+    ) -> str:
         c = self.config
         prompt = (
             "電話で会話しています。短い日本語の話し言葉で返答してください。"
@@ -229,11 +288,15 @@ class Voice:
                 *c.hermes_command,
                 "chat",
                 "--quiet",
+                "--format",
+                "stream-json",
                 "--query",
                 prompt,
                 *session_args,
             ],
             c.agent_timeout_seconds,
+            stream_json=True,
+            on_event=on_event,
         )
         if not reply or "\x1b" in reply or len(reply) > 8000:
             raise RuntimeError("Hermes returned invalid or non-quiet output")

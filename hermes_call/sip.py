@@ -93,6 +93,56 @@ def native_error(exc: Exception) -> str:
     return " ".join(parts)
 
 
+def media_snapshot(info) -> tuple[tuple[int, int, int], ...]:
+    """Keep SWIG's owning CallInfo alive while copying its borrowed media vector."""
+    return tuple((int(item.index), int(item.type), int(item.status)) for item in info.media)
+
+
+class MediaLink:
+    """Own one idempotent bidirectional conference link; cache slot IDs by value."""
+
+    # PJ_EINVAL and PJ_ENOTFOUND: an old conference slot/link was already removed by PJSIP.
+    STALE_SLOT_STATUSES = frozenset((70004, 70006))
+
+    def __init__(self, port, native_error_type):
+        self.port = port
+        self.native_error_type = native_error_type
+        self.media = None
+        self.slot = None
+
+    def disconnect(self) -> None:
+        if self.media is None:
+            return
+        for source, sink in ((self.media, self.port), (self.port, self.media)):
+            try:
+                source.stopTransmit(sink)
+            except self.native_error_type as exc:
+                if getattr(exc, "status", None) not in self.STALE_SLOT_STATUSES:
+                    raise
+                log.info("old audio connection already absent (%s)", native_error(exc))
+        self.media, self.slot = None, None
+
+    def connect(self, media) -> bool:
+        slot = media.getPortId()
+        if slot < 0:
+            raise RuntimeError("audio conference slot is not ready")
+        if self.slot == slot:
+            return False
+        self.disconnect()
+        media.startTransmit(self.port)
+        try:
+            self.port.startTransmit(media)
+        except Exception:
+            # Roll back the receive connection if playback could not be connected.
+            try:
+                media.stopTransmit(self.port)
+            except self.native_error_type as rollback_error:
+                log.error("audio connect rollback failed (%s)", native_error(rollback_error))
+            raise
+        self.media, self.slot = media, slot
+        return True
+
+
 @dataclass
 class CallSession:
     id: str
@@ -111,6 +161,7 @@ class CallSession:
     initial_audio: bytes | None = None
     chat_ref: str | None = None
     failure_reason: str | None = None
+    media_connected: bool = False
 
 
 class SipClient:
@@ -156,6 +207,8 @@ class SipClient:
                 self.session = session
                 self.port = None
                 self.media = None
+                self.media_index = None
+                self.link = None
 
             def onCallState(self, prm):
                 try:
@@ -174,6 +227,8 @@ class SipClient:
                                 session.confirmed_at = loop.time()
                             session.confirmed = True
                             session.answered.set()
+                            # Media may already be active before our incoming Call wrapper exists.
+                            self.connect_media()
                     if info.state == pj.PJSIP_INV_STATE_DISCONNECTED:
                         if session:
                             session.native_disconnected = True
@@ -193,14 +248,19 @@ class SipClient:
                         self.session.answered.set()
 
             def onCallMediaState(self, prm):
+                self.connect_media()
+
+            def connect_media(self):
                 try:
                     if not self.session or self.session.disconnected.is_set():
                         return
-                    for item in self.getInfo().media:
-                        if (
-                            item.type == pj.PJMEDIA_TYPE_AUDIO
-                            and item.status == pj.PJSUA_CALL_MEDIA_ACTIVE
-                        ):
+                    # Do not iterate self.getInfo().media: the temporary owner can be destroyed
+                    # while SWIG's vector/element wrappers still refer to its C++ memory.
+                    snapshot = media_snapshot(self.getInfo())
+                    log.info("call %s media snapshot=%s", self.session.id, snapshot)
+                    for index, kind, status in snapshot:
+                        if kind == pj.PJMEDIA_TYPE_AUDIO and status == pj.PJSUA_CALL_MEDIA_ACTIVE:
+                            media = self.getAudioMedia(index)
                             if self.port is None:
                                 self.port = Port(self.session.audio)
                                 fmt = pj.MediaFormatAudio()
@@ -208,16 +268,19 @@ class SipClient:
                                 fmt.channelCount, fmt.bitsPerSample = 1, 16
                                 fmt.frameTimeUsec = 20000
                                 self.port.createPort("hermes-" + self.session.id, fmt)
-                            media = self.getAudioMedia(item.index)
-                            if self.media is not None:
-                                self.media.stopTransmit(self.port)
-                                self.port.stopTransmit(self.media)
-                            media.startTransmit(self.port)
-                            self.port.startTransmit(media)
+                                self.link = MediaLink(self.port, pj.Error)
+                            changed = self.link.connect(media)
                             self.media = media
+                            self.media_index = index
                             self.session.ready.set()
-                            log.info("call %s audio media ready", self.session.id)
+                            self.session.media_connected = True
+                            if changed:
+                                log.info("call %s audio media ready", self.session.id)
                             break
+                    else:
+                        if self.link is not None:
+                            self.link.disconnect()
+                        self.session.media_connected = False
                 except Exception as exc:
                     log.error("SIP media callback failed (%s)", native_error(exc))
                     self.session.failure_reason = "media_callback_error"
@@ -298,6 +361,7 @@ class SipClient:
             cfg.uaConfig.stunServer.append(server)
         cfg.medConfig.clockRate, cfg.medConfig.sndClockRate = 16000, 16000
         cfg.medConfig.channelCount = 1
+        cfg.medConfig.sndAutoCloseTime = -1  # Keep the headless conference clock running.
         cfg.logConfig.level, cfg.logConfig.consoleLevel = 0, 0
         self.ep.libInit(cfg)
         transport = pj.TransportConfig()

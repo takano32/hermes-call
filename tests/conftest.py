@@ -19,4 +19,5 @@ def config(tmp_path):
         allowed_callers=("1001",),
         hermes_command=(sys.executable,),
         data_dir=tmp_path,
+        sound_effects=False,
     )
