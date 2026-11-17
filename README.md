@@ -32,6 +32,14 @@ cd hermes-call
 bash scripts/install-ubuntu.sh
 ```
 
+インストーラーは PATH と標準のインストール先から Hermes の実行ファイルを検出します。独自の場所に導入した場合は、実行パスを明示できます。
+
+```bash
+HERMES_BIN=/opt/hermes/.hermes/bin/hermes bash scripts/install-ubuntu.sh
+```
+
+検出だけを確認するには `bash scripts/find-hermes.sh` を実行します。普段のシェルで `hermes` が動くのに見つからない場合は、`type -a hermes` で alias・関数・実行ファイルの場所を確認してください。常駐サービスではシェルの alias・関数ではなく、インストール済み launcher の絶対パスを使用します。
+
 スクリプトは必要なビルドツール、ffmpeg、専用 Python venv、PJSIP 2.17 の公式 Python バインディング、Hermes プラグイン、systemd サービスを配置します。PJSIP の初回コンパイルには時間がかかります。ローカル PBX はインストールしません。
 
 初回はランダムな API トークンを生成します。既存の設定ファイルは上書きせず、サービスも設定前には起動しません。

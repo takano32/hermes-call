@@ -17,11 +17,10 @@ repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 install_dir="$HOME/.local/share/hermes-call"
 config_dir="$HOME/.config/hermes-call"
 hermes_home="${HERMES_HOME:-$HOME/.hermes}"
-hermes_bin=$(command -v hermes || true)
-if [[ -z "$hermes_bin" || "$hermes_bin" != /* ]]; then
-  echo 'Install Hermes and complete hermes setup first; hermes must be on PATH.' >&2
-  exit 1
-fi
+# shellcheck source=scripts/find-hermes.sh
+source "$repo_dir/scripts/find-hermes.sh"
+hermes_bin=$(resolve_hermes)
+printf 'Using Hermes launcher: %s\n' "$hermes_bin"
 for local_path in "$HOME" "$install_dir" "$config_dir" "$hermes_home" "$hermes_bin"; do
   if [[ ! "$local_path" =~ ^/[a-zA-Z0-9_./-]+$ ]]; then
     echo 'Install paths must be absolute and contain only letters, digits, _, ., / and -.' >&2
@@ -80,7 +79,7 @@ Group=$(id -gn)
 Environment=HOME=$HOME
 Environment=HERMES_HOME=$hermes_home
 Environment=HERMES_CALL_CONFIG=$config_dir/config.json
-Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=${hermes_bin%/*}:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$install_dir/venv/bin/hermes-call --config $config_dir/config.json
 WorkingDirectory=$install_dir
 Restart=on-failure

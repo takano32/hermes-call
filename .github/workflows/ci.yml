@@ -19,8 +19,8 @@ jobs:
       - run: python -m pytest -q
       - run: python -m ruff check .
       - run: python -m ruff format --check .
-      - run: bash -n scripts/install-ubuntu.sh scripts/build-pjsip.sh
-      - run: shellcheck scripts/install-ubuntu.sh scripts/build-pjsip.sh
+      - run: bash -n scripts/install-ubuntu.sh scripts/build-pjsip.sh scripts/find-hermes.sh
+      - run: shellcheck scripts/install-ubuntu.sh scripts/build-pjsip.sh scripts/find-hermes.sh
       - run: python -m pip wheel --no-deps . --wheel-dir dist
   native-sip:
     runs-on: ubuntu-24.04
