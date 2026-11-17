@@ -77,6 +77,9 @@ def split_text(text: str, limit: int) -> list[str]:
     return chunks
 
 
+AGENT_STREAM_LIMIT = 2 * 1024 * 1024
+
+
 async def run_process(
     argv: list[str],
     deadline_seconds: int,
@@ -93,7 +96,7 @@ async def run_process(
         stdin=asyncio.subprocess.DEVNULL,
         env=env,
         start_new_session=os.name == "posix",
-        limit=256 * 1024,
+        limit=AGENT_STREAM_LIMIT if stream_json else 256 * 1024,
     )
 
     async def read_output() -> bytes:
@@ -130,9 +133,15 @@ async def read_agent_events(
     """Consume the documented Hermes JSONL protocol without retaining tool input/output."""
     total = 0
     final = None
-    while line := await reader.readline():
+    while True:
+        try:
+            line = await reader.readline()
+        except ValueError:
+            raise RuntimeError("Hermes event stream exceeded limit") from None
+        if not line:
+            break
         total += len(line)
-        if total > 2 * 1024 * 1024:
+        if total > AGENT_STREAM_LIMIT:
             raise RuntimeError("Hermes event stream exceeded limit")
         try:
             event = json.loads(line)
