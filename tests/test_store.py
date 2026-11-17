@@ -69,3 +69,20 @@ def test_reject_ambiguous_or_invalid_chat_references(tmp_path, reference):
     store = Store(tmp_path / "calls.sqlite")
     with pytest.raises(ValueError):
         store.bind("1001", reference)
+
+
+def test_insert_uses_explicit_columns_regardless_of_table_column_order(tmp_path):
+    path = tmp_path / "reordered.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE calls (id TEXT PRIMARY KEY, chat_ref TEXT,
+            extension TEXT NOT NULL, message TEXT NOT NULL,
+            created REAL NOT NULL, updated REAL NOT NULL, state TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '')""")
+    store = Store(path)
+    added, created = store.add(
+        {"id": "b" * 32, "extension": "1001", "message": "hello", "chat_ref": "chat-1"}
+    )
+    assert created
+    assert added["extension"] == "1001"
+    assert added["chat_ref"] == "chat-1"
+    assert added["state"] == "preparing"

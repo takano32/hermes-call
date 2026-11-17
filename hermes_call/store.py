@@ -76,7 +76,9 @@ class Store:
                 return dict(existing), False
             now = time.time()
             db.execute(
-                "INSERT INTO calls VALUES (?,?,?,?,?,?,?,?)",
+                """INSERT INTO calls
+                (id, extension, message, created, updated, state, detail, chat_ref)
+                VALUES (?,?,?,?,?,?,?,?)""",
                 (
                     call["id"],
                     call["extension"],
@@ -126,7 +128,8 @@ class Store:
         validate_chat_ref(chat_ref)
         with self.connect() as db:
             db.execute(
-                """INSERT INTO bindings VALUES (?,?,?) ON CONFLICT(extension)
+                """INSERT INTO bindings (extension, chat_ref, updated) VALUES (?,?,?)
+                ON CONFLICT(extension)
                 DO UPDATE SET chat_ref=excluded.chat_ref, updated=excluded.updated""",
                 (extension, chat_ref, time.time()),
             )
