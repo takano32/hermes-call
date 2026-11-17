@@ -43,6 +43,7 @@ class Config:
     agent_timeout_seconds: int = 120
     hermes_toolsets: tuple[str, ...] = ("hermes_call", "cronjob")
     incoming_message: str = "Hermesです。前の会話の続きもお話しできます。ご用件をどうぞ。"
+    allowed_caller_domains: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -61,6 +62,9 @@ class Config:
             value = getattr(self, name)
             if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", value):
                 raise ValueError(f"{name} must be a hostname or IPv4 address, without a port")
+        for domain in self.allowed_caller_domains:
+            if not isinstance(domain, str) or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", domain):
+                raise ValueError("allowed_caller_domains must contain hostnames or IPv4 addresses")
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", self.sip_username):
             raise ValueError("invalid sip_username")
         for name in ("allowed_extensions", "allowed_callers"):
@@ -134,7 +138,7 @@ class Config:
         if not isinstance(raw, dict):
             raise ValueError("config must be a JSON object")
         required = ("sip_peer_ips", "allowed_extensions", "allowed_callers", "hermes_command")
-        for name in (*required, "hermes_toolsets", "stun_servers"):
+        for name in (*required, "hermes_toolsets", "stun_servers", "allowed_caller_domains"):
             if name in raw or name in required:
                 if not isinstance(raw.get(name), list):
                     raise ValueError(f"{name} must be a list")

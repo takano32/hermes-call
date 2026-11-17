@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import signal
 import struct
@@ -12,6 +13,32 @@ from pathlib import Path
 import aiohttp
 
 from .config import Config
+
+log = logging.getLogger(__name__)
+
+
+class SpeechResponseError(RuntimeError):
+    """A safe provider diagnostic that contains no transcript, text or credentials."""
+
+
+async def read_json_object(response, limit: int, stage: str) -> dict:
+    """Read to EOF: StreamReader.read(n) may return just the first network fragment."""
+    body = bytearray()
+    async for chunk in response.content.iter_chunked(16384):
+        if len(body) + len(chunk) > limit:
+            raise SpeechResponseError(f"{stage}: response exceeded {limit} bytes")
+        body.extend(chunk)
+    try:
+        value = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        position = getattr(exc, "pos", getattr(exc, "start", 0))
+        # Log only stage, length and offset. Provider bodies may contain private conversation text.
+        message = f"{stage}: invalid JSON ({len(body)} bytes, offset {position})"
+        log.error(message)
+        raise SpeechResponseError(message) from None
+    if not isinstance(value, dict):
+        raise SpeechResponseError(f"{stage}: expected a JSON object")
+    return value
 
 
 def split_text(text: str, limit: int) -> list[str]:
@@ -122,10 +149,8 @@ class Voice:
                 if response.status != 200:
                     raise RuntimeError("unexpected STT status")
                 # A short recording must not produce unbounded text.
-                body = await response.content.read(65537)
-                if len(body) > 65536:
-                    raise RuntimeError("transcription response exceeded limit")
-                text = json.loads(body).get("text")
+                payload = await read_json_object(response, 65536, "Groq transcription")
+                text = payload.get("text")
                 if not isinstance(text, str) or len(text) > 4000:
                     raise RuntimeError("invalid transcription response")
                 return text.strip()
@@ -140,10 +165,7 @@ class Voice:
                 "/audio_query",
                 {"text": text, "speaker": c.tts_speaker},
             ) as response:
-                body = await response.content.read(1024 * 1024 + 1)
-                if len(body) > 1024 * 1024:
-                    raise RuntimeError("VOICEVOX query exceeded limit")
-                query = json.loads(body)
+                query = await read_json_object(response, 1024 * 1024, "VOICEVOX audio_query")
             async with self.tts_request(
                 "/synthesis",
                 {"speaker": c.tts_speaker, "audioQuery": query},

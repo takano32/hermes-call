@@ -77,6 +77,7 @@ Type=simple
 User=$(id -un)
 Group=$(id -gn)
 Environment=HOME=$HOME
+Environment=PYTHONUNBUFFERED=1
 Environment=HERMES_HOME=$hermes_home
 Environment=HERMES_CALL_CONFIG=$config_dir/config.json
 Environment=PATH=${hermes_bin%/*}:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin

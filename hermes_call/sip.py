@@ -20,12 +20,17 @@ from .store import new_id
 log = logging.getLogger(__name__)
 
 
-def caller_extension(uri: str, domain: str) -> str | None:
+def caller_identity(uri: str) -> tuple[str | None, str | None]:
     match = re.search(
         r"(?:^|<)sips?:([0-9]{1,12})@([A-Za-z0-9.-]+)(?::[0-9]+)?(?:[;>]|$)", uri, re.IGNORECASE
     )
-    if match and match[2].lower() == domain.lower():
-        return match[1]
+    return (match[1], match[2].lower()) if match else (None, None)
+
+
+def caller_extension(uri: str, domain: str) -> str | None:
+    extension, actual_domain = caller_identity(uri)
+    if actual_domain == domain.lower():
+        return extension
     return None
 
 
@@ -37,6 +42,55 @@ def peer_address(source: str) -> str | None:
         return str(ipaddress.IPv4Address(host))
     except ipaddress.AddressValueError:
         return None
+
+
+@dataclass(frozen=True)
+class IncomingDecision:
+    code: int
+    reason: str
+    extension: str | None
+    domain: str | None
+    peer: str | None
+
+
+def incoming_decision(
+    config: Config, uri: str, source: str, *, closing: bool, busy: bool, audio_ready: bool
+) -> IncomingDecision:
+    extension, domain = caller_identity(uri)
+    peer = peer_address(source)
+    domains = config.allowed_caller_domains or (config.sip_domain,)
+    if closing:
+        code, reason = 503, "service_stopping"
+    elif peer is None:
+        code, reason = 403, "invalid_peer_address"
+    elif peer not in config.sip_peer_ips:
+        code, reason = 403, "peer_not_allowed"
+    elif extension is None:
+        code, reason = 403, "invalid_caller_uri"
+    elif domain not in {value.lower() for value in domains}:
+        code, reason = 403, "caller_domain_not_allowed"
+    elif extension not in config.allowed_callers:
+        code, reason = 403, "extension_not_allowed"
+    elif busy:
+        code, reason = 486, "line_busy"
+    elif not audio_ready:
+        code, reason = 503, "initial_audio_not_ready"
+    else:
+        code, reason = 200, "accepted"
+    return IncomingDecision(code, reason, extension, domain, peer)
+
+
+def native_error(exc: Exception) -> str:
+    """Identify the failing native API/attribute without dumping SIP data or credentials."""
+    parts = [type(exc).__name__]
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        parts.append(f"status={status}")
+    for name in ("title", "name"):
+        value = getattr(exc, name, None)
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_():., -]{1,160}", value):
+            parts.append(f"{name}={value}")
+    return " ".join(parts)
 
 
 @dataclass
@@ -56,6 +110,7 @@ class CallSession:
     confirmed_at: float | None = None
     initial_audio: bytes | None = None
     chat_ref: str | None = None
+    failure_reason: str | None = None
 
 
 class SipClient:
@@ -106,6 +161,12 @@ class SipClient:
                 try:
                     info = self.getInfo()
                     session = self.session
+                    log.info(
+                        "SIP call native_id=%s state=%s status=%s",
+                        self.getId(),
+                        info.state,
+                        info.lastStatusCode,
+                    )
                     if session:
                         session.status = info.lastStatusCode
                         if info.state == pj.PJSIP_INV_STATE_CONFIRMED:
@@ -123,8 +184,9 @@ class SipClient:
                         # Keep SWIG objects alive until the native callback returns.
                         loop.call_soon(owner.native_calls.pop, self.getId(), None)
                 except Exception as exc:
-                    log.error("SIP state callback failed (%s)", type(exc).__name__)
+                    log.error("SIP state callback failed (%s)", native_error(exc))
                     if self.session:
+                        self.session.failure_reason = "state_callback_error"
                         self.session.audio.stop()
                         self.session.disconnected.set()
                         self.session.ready.set()
@@ -154,9 +216,11 @@ class SipClient:
                             self.port.startTransmit(media)
                             self.media = media
                             self.session.ready.set()
+                            log.info("call %s audio media ready", self.session.id)
                             break
                 except Exception as exc:
-                    log.error("SIP media callback failed (%s)", type(exc).__name__)
+                    log.error("SIP media callback failed (%s)", native_error(exc))
+                    self.session.failure_reason = "media_callback_error"
                     self.session.audio.stop()
                     self.session.disconnected.set()
                     self.session.ready.set()
@@ -177,19 +241,26 @@ class SipClient:
                 call = Call(self, prm.callId)
                 owner.native_calls[prm.callId] = call
                 try:
-                    extension = caller_extension(call.getInfo().remoteUri, owner.config.sip_domain)
-                    peer = peer_address(prm.rdata.srcAddress)
-                    code = 200
-                    if (
-                        owner.closing
-                        or peer not in owner.config.sip_peer_ips
-                        or extension not in owner.config.allowed_callers
-                    ):
-                        code = 403
-                    elif owner.busy:
-                        code = 486
-                    elif not owner.inbound_audio:
-                        code = 503
+                    decision = incoming_decision(
+                        owner.config,
+                        call.getInfo().remoteUri,
+                        prm.rdata.srcAddress,
+                        closing=owner.closing,
+                        busy=owner.busy,
+                        audio_ready=bool(owner.inbound_audio),
+                    )
+                    code, extension = decision.code, decision.extension
+                    log.log(
+                        logging.INFO if code == 200 else logging.WARNING,
+                        "SIP incoming native_id=%s peer=%s extension=%s caller_domain=%s "
+                        "response=%s reason=%s",
+                        prm.callId,
+                        decision.peer,
+                        extension,
+                        decision.domain,
+                        code,
+                        decision.reason,
+                    )
                     if code == 200:
                         session = CallSession(new_id(), extension, "", False)
                         session.native = call
@@ -202,10 +273,18 @@ class SipClient:
                     op.opt.audioCount, op.opt.videoCount = 1, 0
                     call.answer(op)
                 except Exception as exc:
-                    log.error("SIP incoming callback failed (%s)", type(exc).__name__)
+                    log.error("SIP incoming callback failed (%s)", native_error(exc))
+                    if call.session:
+                        call.session.failure_reason = "incoming_callback_error"
+                        call.session.disconnected.set()
+                        call.session.ready.set()
+                        call.session.answered.set()
                     op = pj.CallOpParam()
                     op.statusCode = 500
-                    call.hangup(op)
+                    try:
+                        call.hangup(op)
+                    except Exception as hangup_error:
+                        log.error("SIP reject/hangup failed (%s)", native_error(hangup_error))
 
         self.call_class = Call
         self.ep = pj.Endpoint()

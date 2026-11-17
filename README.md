@@ -54,6 +54,7 @@ HERMES_BIN=/opt/hermes/.hermes/bin/hermes bash scripts/install-ubuntu.sh
 | `sip_peer_ips` | 着信 INVITE を許可する SIP サーバーの IPv4 リスト |
 | `allowed_extensions` | 発信先として許可する内線 |
 | `allowed_callers` | 着信を許可する相手の内線 |
+| `allowed_caller_domains` | 着信 From URI のドメイン許可リスト。省略・空リスト時は `sip_domain` のみ許可 |
 | `incoming_message` | 着信に応答した後の必須の挨拶。省略時も標準の挨拶を使い、空欄は不可 |
 | `stt_api_key` | Groq API キー |
 | `tts_url` | 標準で `https://voicevox-api.swiftlybot.com/v1` |
@@ -151,6 +152,18 @@ API の公開仕様は IP あたり既定で **60 秒に 30 リクエスト**で
 以前の Asterisk 版の設定とは互換性がありません。旧 `ari_*`・`agi_port`・`endpoint_name` を削除し、新しい設定例へ移行してください。旧版を導入済みなら旧サービスを停止してからインストーラーを再実行し、不要になった Asterisk 設定は管理者が整理してください。
 
 ## 検証
+
+着信直後に切断される場合は `sudo journalctl -u hermes-call -f -n 0` を開いて再発信してください。登録の `status=200` は REGISTER の成功で、着信を受け付けたことを示すログではありません。着信の判定は `SIP incoming ... response=... reason=...`、応答後の終了は `call ... ending outcome=...` に記録します。ログには接続元 IP・内線・From ドメインが含まれますが、SIP メッセージ全体・パスワード・発話は記録しません。
+
+| `reason` | 確認する設定・状態 |
+|---|---|
+| `peer_not_allowed` | `sip_peer_ips` と実際の接続元 IP |
+| `caller_domain_not_allowed` | `allowed_caller_domains` とログの `caller_domain` |
+| `extension_not_allowed` | `allowed_callers` と実際の発信元内線 |
+| `line_busy` | 既存通話または発信用の音声準備中 |
+| `initial_audio_not_ready` | 初期メッセージの準備状態 |
+
+PBX が登録先の DNS 名と異なるドメイン（PBX の IP など）を着信 From に使う場合は、その値を `allowed_caller_domains` へ明示します。登録用の `sip_domain` を変更する必要はありません。許可する値は実際の PBX 設定と照合してください。
 
 ```bash
 python -m pip install -e '.[dev]'

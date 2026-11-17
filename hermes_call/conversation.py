@@ -47,6 +47,8 @@ class Conversations:
                 await body
             if session.disconnected.is_set() and not session.confirmed:
                 outcome = "unanswered" if session.status in (408, 480, 486, 487, 603) else "failed"
+            if session.failure_reason:
+                outcome = "failed"
         except asyncio.CancelledError:
             outcome = "interrupted"
             raise
@@ -67,6 +69,13 @@ class Conversations:
                 except Exception as notification_error:
                     log.warning("error notification failed (%s)", type(notification_error).__name__)
         finally:
+            log.info(
+                "call %s ending outcome=%s sip_status=%s reason=%s",
+                session.id,
+                outcome,
+                session.status,
+                session.failure_reason or "normal",
+            )
             body.cancel()
             disconnected.cancel()
             await asyncio.gather(body, disconnected, return_exceptions=True)

@@ -4,9 +4,12 @@ import sys
 import wave
 from unittest.mock import AsyncMock
 
+import aiohttp
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
-from hermes_call.voice import Voice, run_process, split_text
+from hermes_call.voice import SpeechResponseError, Voice, read_json_object, run_process, split_text
 
 
 class SpeechResponse:
@@ -111,3 +114,48 @@ def test_subprocess_errors_and_timeout():
         asyncio.run(run_process([sys.executable, "-c", "raise SystemExit(3)"], 5))
     with pytest.raises(TimeoutError):
         asyncio.run(run_process([sys.executable, "-c", "import time; time.sleep(30)"], 1))
+
+
+def test_fragmented_http_json_is_read_to_eof():
+    async def scenario():
+        first_sent, continue_response = asyncio.Event(), asyncio.Event()
+
+        async def stream(request):
+            response = web.StreamResponse(headers={"Content-Type": "application/json"})
+            await response.prepare(request)
+            await response.write(b'{"outputSamplingRate":24000,"text":"')
+            first_sent.set()
+            await continue_response.wait()
+            await response.write("こんにちは".encode())
+            await response.write(b'"}')
+            await response.write_eof()
+            return response
+
+        app = web.Application()
+        app.router.add_get("/query", stream)
+        async with TestServer(app) as server, aiohttp.ClientSession() as session:
+            async with session.get(server.make_url("/query")) as response:
+                await first_sent.wait()
+                task = asyncio.create_task(read_json_object(response, 65536, "test audio_query"))
+                await asyncio.sleep(0.01)
+                assert not task.done()  # The first network fragment is not a whole JSON document.
+                continue_response.set()
+                result = await asyncio.wait_for(task, 1)
+                assert result == {"outputSamplingRate": 24000, "text": "こんにちは"}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "body,limit,expected",
+    [
+        (b'{"secret":"private transcript",', 1000, "invalid JSON"),
+        (b'{"a":' + b" " * 100, 10, "exceeded"),
+        (b"[]", 1000, "expected a JSON object"),
+    ],
+)
+def test_invalid_provider_json_is_bounded_and_private(body, limit, expected, caplog):
+    with pytest.raises(SpeechResponseError, match=expected) as caught:
+        asyncio.run(read_json_object(SpeechResponse(body), limit, "VOICEVOX audio_query"))
+    assert "private transcript" not in str(caught.value)
+    assert "private transcript" not in caplog.text
