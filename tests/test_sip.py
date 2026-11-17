@@ -8,6 +8,7 @@ from hermes_call.sip import (
     CallSession,
     MediaLink,
     SipClient,
+    _abort_session,
     caller_extension,
     incoming_decision,
     media_snapshot,
@@ -162,3 +163,58 @@ def test_unexpected_native_disconnect_error_is_not_swallowed():
     with pytest.raises(NativeMediaError):
         link.connect(new)
     new.startTransmit.assert_not_called()
+
+
+def test_abort_session_stops_audio_and_wakes_waiters_safely():
+    _abort_session(None, "ignored")
+    session = CallSession("a" * 32, "1001", "hello", False)
+    _abort_session(session, "incoming_callback_error")
+    assert session.failure_reason == "incoming_callback_error"
+    assert session.audio.ended.is_set()
+    assert session.disconnected.is_set()
+    assert session.ready.is_set()
+    assert session.answered.is_set()
+
+
+def test_dial_failure_with_invalid_native_id_releases_line_immediately(config):
+    on_call = Mock()
+    sip = SipClient(config, on_call)
+    sip.registered = True
+    sip.pj = SimpleNamespace(
+        PJSUA_INVALID_ID=-1,
+        CallOpParam=lambda init=False: SimpleNamespace(opt=SimpleNamespace()),
+    )
+    fake_call = Mock()
+    fake_call.getId.return_value = -1
+    fake_call.makeCall.side_effect = RuntimeError("makeCall failed")
+    sip.call_class = Mock(return_value=fake_call)
+
+    with pytest.raises(RuntimeError, match="makeCall failed"):
+        sip.dial("a" * 32, "1001", "hello", b"\0\0")
+
+    assert not sip.busy
+    assert sip.native_calls == {}
+    assert fake_call.session is None
+    on_call.assert_not_called()
+    fake_call.hangup.assert_not_called()
+
+
+def test_dial_callback_failure_after_make_call_hangs_up_and_releases_line(config):
+    on_call = Mock(side_effect=RuntimeError("on_call failed"))
+    sip = SipClient(config, on_call)
+    sip.registered = True
+    sip.pj = SimpleNamespace(
+        PJSUA_INVALID_ID=-1,
+        CallOpParam=lambda init=False: SimpleNamespace(opt=SimpleNamespace()),
+    )
+    fake_call = Mock()
+    fake_call.getId.return_value = 7
+    sip.call_class = Mock(return_value=fake_call)
+
+    with pytest.raises(RuntimeError, match="on_call failed"):
+        sip.dial("a" * 32, "1001", "hello", b"\0\0")
+
+    assert not sip.busy
+    assert sip.native_calls == {7: fake_call}
+    fake_call.hangup.assert_called_once()
+    assert fake_call.session is None
