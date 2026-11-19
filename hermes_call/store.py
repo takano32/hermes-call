@@ -11,6 +11,9 @@ from typing import Any
 
 ID = re.compile(r"[a-f0-9]{32}\Z")
 SESSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\Z")
+# Empty string marks legacy migrated rows whose resolved chat_ref was non-NULL
+# and whose original caller-provided chat_ref cannot be recovered.
+LEGACY_UNKNOWN_CHAT_REF = ""
 
 
 def validate_chat_ref(value: str) -> str:
@@ -49,7 +52,10 @@ class Store:
                 db.execute("ALTER TABLE calls ADD COLUMN chat_ref TEXT")
             if "request_chat_ref" not in columns:
                 db.execute("ALTER TABLE calls ADD COLUMN request_chat_ref TEXT")
-                db.execute("UPDATE calls SET request_chat_ref=chat_ref")
+                db.execute(
+                    "UPDATE calls SET request_chat_ref=? WHERE chat_ref IS NOT NULL",
+                    (LEGACY_UNKNOWN_CHAT_REF,),
+                )
             db.execute("""CREATE TABLE IF NOT EXISTS bindings (
                 extension TEXT PRIMARY KEY, chat_ref TEXT NOT NULL, updated REAL NOT NULL)""")
         if os.name == "posix":
@@ -75,14 +81,20 @@ class Store:
         request_chat_ref = (
             call["request_chat_ref"] if "request_chat_ref" in call else call.get("chat_ref")
         )
+        if request_chat_ref == LEGACY_UNKNOWN_CHAT_REF:
+            raise ValueError("chat_ref must be an explicit Hermes session ID")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT * FROM calls WHERE id=?", (call["id"],)).fetchone()
             if existing:
+                request_ref_matches = (
+                    existing["request_chat_ref"] == LEGACY_UNKNOWN_CHAT_REF
+                    or existing["request_chat_ref"] == request_chat_ref
+                )
                 if (
                     existing["extension"] != call["extension"]
                     or existing["message"] != call["message"]
-                    or existing["request_chat_ref"] != request_chat_ref
+                    or not request_ref_matches
                 ):
                     raise ValueError("request_id already used for a different call")
                 return self._public_call(existing), False

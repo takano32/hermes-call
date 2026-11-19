@@ -91,3 +91,73 @@ def test_insert_uses_explicit_columns_regardless_of_table_column_order(tmp_path)
     assert "request_chat_ref" not in store.list()[0]
     with pytest.raises(ValueError, match="different"):
         store.add({"id": "b" * 32, "extension": "1001", "message": "hello", "chat_ref": "chat-2"})
+
+
+def test_migration_preserves_retry_compatibility_for_legacy_bound_calls(tmp_path):
+    path = tmp_path / "legacy_bound.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE calls (
+            id TEXT PRIMARY KEY, extension TEXT NOT NULL, message TEXT NOT NULL,
+            created REAL NOT NULL, updated REAL NOT NULL,
+            state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', chat_ref TEXT)""")
+        # Legacy call created while extension was bound to "bound-chat" (original chat_ref unknown).
+        db.execute(
+            "INSERT INTO calls VALUES (?,?,?,?,?,?,?,?)",
+            ("a" * 32, "1001", "hello", 1, 1, "completed", "", "bound-chat"),
+        )
+        # Legacy call created with no binding and no originating chat_ref.
+        db.execute(
+            "INSERT INTO calls VALUES (?,?,?,?,?,?,?,?)",
+            ("b" * 32, "1001", "hello", 2, 2, "completed", "", None),
+        )
+
+    store = Store(path)
+    # Retrying the legacy bound call with omitted or originating chat_ref must still succeed.
+    for retry_ref in (None, "origin-chat", "bound-chat"):
+        row, created = store.add(
+            {
+                "id": "a" * 32,
+                "extension": "1001",
+                "message": "hello",
+                "chat_ref": retry_ref,
+                "request_chat_ref": retry_ref,
+            }
+        )
+        assert not created
+        assert row["chat_ref"] == "bound-chat"
+        assert "request_chat_ref" not in row
+
+    # Changing message on a legacy call is still rejected.
+    with pytest.raises(ValueError, match="different"):
+        store.add(
+            {
+                "id": "a" * 32,
+                "extension": "1001",
+                "message": "changed",
+                "chat_ref": None,
+                "request_chat_ref": None,
+            }
+        )
+
+    # Legacy call with chat_ref=NULL definitely had no originating chat_ref.
+    row, created = store.add(
+        {
+            "id": "b" * 32,
+            "extension": "1001",
+            "message": "hello",
+            "chat_ref": None,
+            "request_chat_ref": None,
+        }
+    )
+    assert not created
+    assert row["chat_ref"] is None
+    with pytest.raises(ValueError, match="different"):
+        store.add(
+            {
+                "id": "b" * 32,
+                "extension": "1001",
+                "message": "hello",
+                "chat_ref": "other-chat",
+                "request_chat_ref": "other-chat",
+            }
+        )

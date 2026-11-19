@@ -150,3 +150,31 @@ def test_chat_binding_api_and_outbound_chat_selection(config, tmp_path):
         await dialer.close()
 
     asyncio.run(scenario())
+
+
+def test_legacy_migrated_bound_call_retry_succeeds_via_dialer(config, tmp_path):
+    import sqlite3
+
+    async def scenario():
+        path = tmp_path / "legacy.sqlite"
+        with sqlite3.connect(path) as db:
+            db.execute("""CREATE TABLE calls (
+                id TEXT PRIMARY KEY, extension TEXT NOT NULL, message TEXT NOT NULL,
+                created REAL NOT NULL, updated REAL NOT NULL,
+                state TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', chat_ref TEXT)""")
+            db.execute(
+                "INSERT INTO calls VALUES (?,?,?,?,?,?,?,?)",
+                ("9" * 32, "1001", "hello", 1, 1, "completed", "", "bound-chat"),
+            )
+        store = Store(path)
+        sip = FakeSIP()
+        dialer = Dialer(config, store, sip, AsyncMock())
+        # Retry with omitted chat_ref (as in a cron or unbound retry) must return the existing row.
+        retried = await dialer.dial(
+            {"extension": "1001", "message": "hello", "request_id": "9" * 32}
+        )
+        assert retried["id"] == "9" * 32
+        assert retried["chat_ref"] == "bound-chat"
+        assert sip.requests == []
+
+    asyncio.run(scenario())
