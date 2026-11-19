@@ -212,7 +212,36 @@ def test_dial_failure_with_invalid_native_id_releases_line_immediately(config):
     fake_call.hangup.assert_not_called()
 
 
-def test_dial_callback_failure_after_make_call_hangs_up_and_releases_line(config):
+def test_dial_failure_after_native_id_hands_off_to_on_call_and_keeps_busy(config):
+    handed_off = []
+    sip = SipClient(config, handed_off.append)
+    sip.registered = True
+    sip.pj = SimpleNamespace(
+        PJSUA_INVALID_ID=-1,
+        CallOpParam=lambda init=False: SimpleNamespace(opt=SimpleNamespace()),
+    )
+    fake_call = Mock()
+    fake_call.getId.return_value = 7
+    fake_call.makeCall.side_effect = RuntimeError("makeCall failed after id")
+
+    def make_call_wrapper(_account, session=None):
+        fake_call.session = session
+        return fake_call
+
+    sip.call_class = Mock(side_effect=make_call_wrapper)
+
+    with pytest.raises(RuntimeError, match="makeCall failed after id"):
+        sip.dial("a" * 32, "1001", "hello", b"\0\0")
+
+    assert sip.busy
+    assert sip.native_calls == {7: fake_call}
+    assert len(handed_off) == 1
+    assert handed_off[0].id == "a" * 32
+    assert fake_call.session is handed_off[0]
+    fake_call.hangup.assert_not_called()
+
+
+def test_dial_failure_keeps_session_and_busy_when_handoff_and_hangup_fail(config):
     on_call = Mock(side_effect=RuntimeError("on_call failed"))
     sip = SipClient(config, on_call)
     sip.registered = True
@@ -222,12 +251,68 @@ def test_dial_callback_failure_after_make_call_hangs_up_and_releases_line(config
     )
     fake_call = Mock()
     fake_call.getId.return_value = 7
-    sip.call_class = Mock(return_value=fake_call)
+    fake_call.makeCall.side_effect = RuntimeError("makeCall failed after id")
+    fake_call.hangup.side_effect = RuntimeError("hangup failed")
 
+    def make_call_wrapper(_account, session=None):
+        fake_call.session = session
+        return fake_call
+
+    sip.call_class = Mock(side_effect=make_call_wrapper)
+
+    with pytest.raises(RuntimeError, match="makeCall failed after id"):
+        sip.dial("a" * 32, "1001", "hello", b"\0\0")
+
+    assert sip.busy
+    assert "a" * 32 in sip.sessions
+    assert sip.native_calls == {7: fake_call}
+    assert fake_call.session is sip.sessions["a" * 32]
+    assert fake_call.session.release_on_disconnect is True
+    on_call.assert_called_once()
+    fake_call.hangup.assert_called_once()
+
+
+def test_dial_callback_failure_releases_only_after_native_disconnect_confirmed(config):
+    on_call = Mock(side_effect=RuntimeError("on_call failed"))
+    sip = SipClient(config, on_call)
+    sip.registered = True
+    sip.pj = SimpleNamespace(
+        PJSUA_INVALID_ID=-1,
+        CallOpParam=lambda init=False: SimpleNamespace(opt=SimpleNamespace()),
+    )
+    fake_call = Mock()
+    fake_call.getId.return_value = 7
+
+    def make_call_wrapper(_account, session=None):
+        fake_call.session = session
+        return fake_call
+
+    sip.call_class = Mock(side_effect=make_call_wrapper)
+
+    # Without confirmed native disconnect, session and busy stay held.
     with pytest.raises(RuntimeError, match="on_call failed"):
         sip.dial("a" * 32, "1001", "hello", b"\0\0")
 
-    assert not sip.busy
+    assert sip.busy
     assert sip.native_calls == {7: fake_call}
+    assert fake_call.session is sip.sessions["a" * 32]
+    assert fake_call.session.release_on_disconnect is True
+    on_call.assert_called_once()
     fake_call.hangup.assert_called_once()
+
+    # When hangup confirms native disconnect synchronously, session is released immediately.
+    sip.release(sip.sessions["a" * 32])
+    on_call.reset_mock()
+    fake_call.hangup.reset_mock()
+
+    def sync_hangup(_op):
+        fake_call.session.native_disconnected = True
+
+    fake_call.hangup.side_effect = sync_hangup
+    with pytest.raises(RuntimeError, match="on_call failed"):
+        sip.dial("b" * 32, "1001", "hello", b"\0\0")
+
+    assert not sip.busy
     assert fake_call.session is None
+    on_call.assert_called_once()
+    fake_call.hangup.assert_called_once()
